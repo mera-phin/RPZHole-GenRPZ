@@ -1,0 +1,576 @@
+#!/usr/bin/bash
+
+#define some paths to save text
+
+myLists=(/etc/systemd/system/genrpz.service.d/lists)
+myInclusions=(/etc/systemd/system/genrpz.service.d/store)
+myTmpstages=(/tmp/$(/usr/bin/date +%s)/sources_stage)
+
+#set injection variables
+myDNSHost=("172.16.2.4")
+myDNSZone=("f")
+myTTL=("300")
+myTail=("send\nquit")
+myOpt=("")
+myOptcase=("")
+
+
+
+#get script opt
+
+if [[ $# -ge 1 ]]; then
+
+        myOpt=$1
+
+        case ${myOpt} in
+            -s|--scrub) myOptcase=("1");;
+            -c|--clearcache) myOptcase=("2");;
+            -u|--update) myOptcase=("3");;
+            -v|--version) myOptcase=("4");;
+            -h|--help) myOptcase=("5");;
+            *);; #default no-op result
+        esac
+
+elif [[ $# -lt 1 ]]; then
+
+        myOptcase=("6")
+
+fi
+
+if [[ "${myOptcase}" == "4" ]]; then
+        echo "
+        GenRPZ BIND-DNS Response Policy Zone hostslist translate/uploader
+        "
+        exit 0
+fi
+
+
+if [[ "${myOptcase}" == "5" ]]; then
+        echo "
+        RP(i)Z-hole GenRPZ hostlist downloader and dns uploader script.
+
+        -s|--scrub - to clear all current dns entries from RPZ host.
+        -c|--clearcache - to clear all current download caches.
+        -u|--update - to force an update following a large reduction in available rules.
+        -v|--version - gives script version.
+        -h|--help - This helplet.
+        "
+        exit 0
+fi
+
+
+
+#################### --- Define Functions --- ####################
+
+# Scrub-down DNS server to zero entries ( two loops.. basic fast, and followup IDN corrected)
+
+function scrub
+{
+
+#do quick-n-dirty run against full zonefile, then rerun and see if theres andy idn entries to deal with after...IDN on 600k lines is sloooooow
+
+        /usr/bin/awk '((length($1)<=252)&&(($4)=="CNAME"))  {print "del "$1" "$4" "$5""}' ${myTmpstages}25/hostslist.axfr >>${myTmpstages}24/hostslist.nsupdate
+
+
+# note insert this length filter just after full master hoststable create
+
+
+        /usr/bin/split -a 4 --additional-suffix=-fltr -l 800 ${myTmpstages}24/hostslist.nsupdate ${myTmpstages}23/sgmt-
+
+
+#quick variable for this filetest, as it doesn't like concat const+var
+
+myFilename1=(${myTmpstages}23/sgmt-*-fltr)
+
+for ((i=0; i<${#myFilename1[@]}; i++)); do
+
+        #do something to each element of array
+
+       /usr/bin/echo -e "server ${myDNSHost}\nzone ${myDNSZone}\nttl ${myTTL}\n" >>${myFilename1[$i]}.nsupdate.segments
+
+       /usr/bin/cat ${myFilename1[$i]} >>${myFilename1[$i]}.nsupdate.segments
+
+       /usr/bin/echo -e "\n${myTail}" >>${myFilename1[$i]}.nsupdate.segments
+
+#run nsupdate direct, the delay each loop gives a pause for named to settle
+
+       /usr/bin/nsupdate -k ${myInclusions}/Kgenrpz-ddns.fltr.key ${myFilename1[$i]}.nsupdate.segments
+
+done
+
+
+#reset and restart to clear down trailing IDN names
+
+#clear working spaces
+
+        /usr/bin/rm -r -f ${myTmpstages}{1..25}/*
+
+
+#restart to clear up unscrubbed IDN names
+
+#       /usr/bin/mkdir -p ${myTmpstages}{1..25}
+
+#get axfr from server
+
+        /usr/bin/dig @${myDNSHost} IN AXFR ${myDNSZone} >>${myTmpstages}25/hostslist.axfr
+
+
+# filter axfr zonefile to make list of currently filtered domains.
+
+        /usr/bin/awk '(($4)=="CNAME") {gsub(/\.f\.$/,"",$1); print $1}' ${myTmpstages}25/hostslist.axfr >>${myTmpstages}24/hostslist.trimmed
+
+#gen idn versions for scrubbing against axfr
+while IFS= read -r myFilename2; do
+        /usr/bin/idn -a -- $myFilename2 >>${myTmpstages}23/hostslist.idnconv 2>>/dev/null
+done<${myTmpstages}24/hostslist.trimmed
+
+#process example  awk 'FNR==NR {myArr[$1]++;next} (!($1 in myArr)&&(length($1)<=252)){print "add "($1)".f CNAME *." }' 1 2
+
+        /usr/bin/awk '(length($1)<=252) { print "del "($1)".f CNAME *." ; }' ${myTmpstages}23/hostslist.idnconv >>${myTmpstages}22/hostslist.chklen
+
+        #check for any output.. a zero output = no work to do so stop.
+
+        if [[ ! -s "${myTmpstages}22/hostslist.chklen" ]]; then
+                /usr/bin/echo "no data to process, stopping"
+                exit 0
+        fi
+
+
+        /usr/bin/split -a 4 --additional-suffix=-fltr -l 800 ${myTmpstages}22/hostslist.chklen ${myTmpstages}21/sgmt-
+
+
+#quick variable for this filetest, as it doesn't like concat const+var
+
+myFilename3=(${myTmpstages}21/sgmt-*-fltr)
+
+for ((i=0; i<${#myFilename3[@]}; i++)); do
+
+        #do something to each element of array
+
+       /usr/bin/echo -e "server ${myDNSHost}\nzone ${myDNSZone}\nttl ${myTTL}\n" >>${myFilename3[$i]}.nsupdate.segments
+
+       /usr/bin/cat ${myFilename3[$i]} >>${myFilename3[$i]}.nsupdate.segments
+
+       /usr/bin/echo -e "\n${myTail}" >>${myFilename3[$i]}.nsupdate.segments
+
+#run nsupdate direct, the delay each loop gives a pause for named to settle
+
+       /usr/bin/nsupdate -k ${myInclusions}/Kgenrpz-ddns.fltr.key ${myFilename3[$i]}.nsupdate.segments
+
+
+done
+
+        /usr/bin/echo "done"
+
+exit 0
+
+}
+
+
+function initialise
+{
+
+#rapid update mode, no idn scrub just let dns server process conversions
+
+
+        /usr/bin/awk '(length($1)<=252) {print "add "($1)".f CNAME *.";}' ${myTmpstages}10/hostslist.scrubbed >>${myTmpstages}11/hostslist.chklen
+
+        #check for any output.. a zero output = no work to do so stop.
+
+        if [[ ! -s "${myTmpstages}11/hostslist.chklen" ]]; then
+                /usr/bin/echo "no data to process, stopping"
+                exit 0
+        fi
+
+
+        /usr/bin/split -a 4 --additional-suffix=-fltr -l 800 ${myTmpstages}11/hostslist.chklen ${myTmpstages}12/sgmt-
+
+
+#quick variable for this filetest, as it doesn't like concat const+var
+
+myFilename9=(${myTmpstages}12/sgmt-*-fltr)
+
+for ((i=0; i<${#myFilename9[@]}; i++)); do
+
+        #do something to each element of array
+
+       /usr/bin/echo -e "server ${myDNSHost}\nzone ${myDNSZone}\nttl ${myTTL}\n" >>${myFilename9[$i]}.nsupdate.segments
+
+       /usr/bin/cat ${myFilename9[$i]} >>${myFilename9[$i]}.nsupdate.segments
+
+       /usr/bin/echo -e "\n${myTail}" >>${myFilename9[$i]}.nsupdate.segments
+
+#run nsupdate direct, the delay each loop gives a pause for named to settle
+
+       /usr/bin/nsupdate -k ${myInclusions}/Kgenrpz-ddns.fltr.key ${myFilename9[$i]}.nsupdate.segments
+
+
+done
+
+        /usr/bin/echo "done"
+
+exit 0
+
+}
+
+
+function synch
+{
+
+#filter and convert ascii IDN domains to unicode. get list of non-idn-coded names for adding to converted idn for full scrub against axfr
+
+        /usr/bin/awk '(($1)~/.*xn--.*$/) {print ($1)}' ${myTmpstages}10/hostslist.scrubbed >>${myTmpstages}11/hostslist.idnsrc
+        /usr/bin/awk '(($1)!~/.*xn--.*$/) {print ($1)}' ${myTmpstages}10/hostslist.scrubbed >>${myTmpstages}11/hostslist.noidnsrc
+
+#gen idn versions for scrubbing against axfr
+while IFS= read -r myFilename8; do
+        /usr/bin/idn -u -- $myFilename8 >>${myTmpstages}12/hostslist.idnconv 2>>/dev/null
+done<${myTmpstages}11/hostslist.idnsrc
+
+
+#gather all local versions for subtract synch against axfr
+
+        /usr/bin/cat ${myTmpstages}10/hostslist.scrubbed ${myTmpstages}12/hostslist.idnconv >>${myTmpstages}13/hostslist.idnfull
+
+
+#scan zonefile for domains which are still there which shouldn't be in IDN mode
+
+        /usr/bin/awk 'FNR==NR {myArr[$1]++;next} (!myArr[$1]++) {print ($1)}' ${myTmpstages}13/hostslist.idnfull ${myTmpstages}24/hostslist.trimmed >>${myTmpstages}14/hostslist.indns
+
+#reverse list of IDN format names from DNS to ascii-coded and recheck against updatelist.
+
+        while IFS= read -r myFilename10; do
+                /usr/bin/idn -a -- $myFilename10 >>${myTmpstages}15/hostslist.recheck.fromidn 2>>/dev/null
+        done<${myTmpstages}14/hostslist.indns
+
+
+if [[ -s ${myTmpstages}15/hostslist.recheck.fromidn ]]; then
+
+        /usr/bin/awk 'FNR==NR {myArr[$1]++;next} (!myArr[$1]++) {print ($1)}' ${myTmpstages}13/hostslist.idnfull ${myTmpstages}15/hostslist.recheck.fromidn >>${myTmpstages}16/hostslist.recheck-ascii.sub
+
+        while IFS= read -r myFilename11; do
+                /usr/bin/idn -u -- $myFilename11 >>${myTmpstages}17/hostslist.recheck-idn.sub 2>>/dev/null
+        done<${myTmpstages}16/hostslist.recheck-ascii.sub
+
+
+        if [[ -s "${myTmpstages}17/hostslist.recheck-idn.sub" ]]; then
+
+        /usr/bin/awk 'FNR==NR {myArr[$1]++;next} (!myArr[$1]++) {print ($1)}' ${myTmpstages}16/hostslist.recheck-ascii.sub ${myTmpstages}17/hostslist.recheck-idn.sub >>${myTmpstages}18/hostslist.recheck.sub
+
+        fi
+
+        /usr/bin/cat ${myTmpstages}16/hostslist.recheck-ascii.sub >>${myTmpstages}18/hostslist.recheck.sub
+
+fi
+
+
+#forward compile to IDN the missing 'inupdate' list and recheck in IDN format vs dns contents
+
+        /usr/bin/awk 'FNR==NR {myArr[$1]++;next} (!myArr[$1]++) {print ($1)}' ${myTmpstages}24/hostslist.trimmed ${myTmpstages}13/hostslist.idnfull >>${myTmpstages}14/hostslist.inupdate
+
+
+        while IFS= read -r myFilename12; do
+                /usr/bin/idn -u -- $myFilename12 >>${myTmpstages}15/hostslist.recheck.toidn 2>>/dev/null
+        done<${myTmpstages}14/hostslist.inupdate
+
+
+if [[ -s ${myTmpstages}15/hostslist.recheck.toidn ]]; then
+
+        /usr/bin/awk 'FNR==NR {myArr[$1]++;next} (!myArr[$1]++) {print ($1)}' ${myTmpstages}24/hostslist.trimmed ${myTmpstages}15/hostslist.recheck.toidn >>${myTmpstages}16/hostslist.recheck-idn.add
+
+
+#pre-run final idn domains back to ascii for retry on dns
+
+        while IFS= read -r myFilename13; do
+                /usr/bin/idn -a -- $myFilename13 >>${myTmpstages}17/hostslist.recheck-ascii.add 2>>/dev/null
+        done<${myTmpstages}16/hostslist.recheck-idn.add
+
+
+        if [[ -s "${myTmpstages}16/hostslist.recheck-idn.add" ]]; then
+
+        /usr/bin/awk 'FNR==NR {myArr[$1]++;next} (!myArr[$1]++) {print ($1)}' ${myTmpstages}17/hostslist.recheck-ascii.add ${myTmpstages}16/hostslist.recheck-idn.add >>${myTmpstages}18/hostslist.recheck.add
+
+        fi
+
+        /usr/bin/cat ${myTmpstages}17/hostslist.recheck-ascii.add >>${myTmpstages}18/hostslist.recheck.add
+
+fi
+
+#process example  awk 'FNR==NR {myArr[$1]++;next} (!($1 in myArr)&&(length($1)<=252)){print "add "($1)".f CNAME *." }' 1 2
+
+if [[ -s ${myTmpstages}18/hostslist.recheck.sub ]]; then
+
+        /usr/bin/awk '(length($1)<=252) {print "del "($1)".f CNAME *.";}' ${myTmpstages}18/hostslist.recheck.sub >>${myTmpstages}19/hostslist.chklen
+        /usr/bin/echo -e "\nsend\n" >>${myTmpstages}19/hostslist.chklen
+
+fi
+
+if [[ -s ${myTmpstages}18/hostslist.recheck.add ]]; then
+
+        /usr/bin/awk '(length($1)<=252) {print "add "($1)".f CNAME *.";}' ${myTmpstages}18/hostslist.recheck.add >>${myTmpstages}19/hostslist.chklen
+
+fi
+
+        #check for any output.. a zero output = no work to do so stop.
+
+        if [[ ! -s "${myTmpstages}19/hostslist.chklen" ]]; then
+                /usr/bin/echo "no data to process, stopping"
+                exit 0
+        fi
+
+
+        /usr/bin/split -a 4 --additional-suffix=-fltr -l 800 ${myTmpstages}19/hostslist.chklen ${myTmpstages}20/sgmt-
+
+
+#quick variable for this filetest, as it doesn't like concat const+var
+
+myFilename14=(${myTmpstages}20/sgmt-*-fltr)
+
+for ((i=0; i<${#myFilename14[@]}; i++)); do
+
+        #do something to each element of array
+
+       /usr/bin/echo -e "server ${myDNSHost}\nzone ${myDNSZone}\nttl ${myTTL}\n" >>${myFilename14[$i]}.nsupdate.segments
+
+       /usr/bin/cat ${myFilename14[$i]} >>${myFilename14[$i]}.nsupdate.segments
+
+       /usr/bin/echo -e "\n${myTail}" >>${myFilename14[$i]}.nsupdate.segments
+
+
+#run nsupdate direct, the delay each loop gives a pause for named to settle
+
+       /usr/bin/nsupdate -k ${myInclusions}/Kgenrpz-ddns.fltr.key ${myFilename14[$i]}.nsupdate.segments
+
+done
+
+
+
+#archive hosts list to storage
+
+
+        /usr/bin/cp -d -p -r ${myTmpstages}3/* ${myInclusions}/sources/
+
+
+        /usr/bin/rm -r -f ${myTmpstages}{1..25}
+
+
+        /usr/bin/echo "done"
+exit 0
+
+}
+
+
+function srcprep
+{
+
+
+#main functions for load-synch
+
+#grab archived old hosts list from storage and add to temp
+
+if [[ -s "${myLists}/sources.list" ]]; then
+
+        /usr/bin/awk '(($1)~/^http(s)?:\/\//) {print ($1)}' ${myLists}/sources.list >>${myTmpstages}1/sources.fltr
+
+    /usr/bin/awk '{gsub(/^http(s)?:\/\//,"",($1)); print ($1)}' ${myTmpstages}1/sources.fltr >>${myTmpstages}2/sourceslist.prepped
+
+        while IFS= read -r myFilename15; do
+                [[ "$p" == */* ]] || p="./$p"
+                /usr/bin/mkdir -p ${myTmpstages}3/${myFilename15%/*}
+                if [[ -s "${myInclusions}/sources/$myFilename15" ]]; then
+                        /usr/bin/cp -d -p -r ${myInclusions}/sources/$myFilename15 ${myTmpstages}3/$myFilename15
+                fi
+        done<${myTmpstages}2/sourceslist.prepped
+
+
+#get/check our sources
+
+        /usr/bin/wget -t 3 -q -N -x -P ${myTmpstages}3 -i ${myLists}/sources.list
+else
+        /usr/bin/echo "No sources selected. Stopping"
+        exit 0
+fi
+
+
+#unpack zipped files
+
+        /usr/bin/find ${myTmpstages}3/ -type f -name "*.zip" -exec sh -c "/usr/bin/unzip  -q -q -u -o {} -d {}-out" \;
+
+
+if [[ -s "${myLists}/flat-sources.list" && -s "${myLists}/classic-sources.list" && -s "${myLists}/complex-sources.list" ]]; then
+
+#start sorting hostfiles, easy ones first.
+
+        while IFS= read -r myFilename4; do
+                if [[ -s "${myTmpstages}3/$myFilename4" ]]; then
+                        /usr/bin/cat ${myTmpstages}3/$myFilename4 >>${myTmpstages}4/hosts.list.part1
+                fi
+        done<${myLists}/flat-sources.list
+
+
+#ok, next stage.. classic hosts style. build all files to one
+
+        while IFS= read -r myFilename5; do
+                if [[ -s "${myTmpstages}3/$myFilename5" ]]; then
+                        /usr/bin/cat ${myTmpstages}3/$myFilename5 >>${myTmpstages}4/hosts.list.part2
+                fi
+        done<${myLists}/classic-sources.list
+
+
+#lastly sources that either use hybrid or complex storage style
+
+        while IFS= read -r myFilename6; do
+                if [[ -s "${myTmpstages}3/$myFilename6" ]]; then
+                        /usr/bin/cat ${myTmpstages}3/$myFilename6 >>${myTmpstages}4/hosts.list.part3
+                fi
+        done<${myLists}/complex-sources.list
+
+else
+        /usr/bin/echo "No filter sources. Stopping"
+        exit 0
+fi
+
+
+#process all files to unix text style
+
+#find ${myTmpstages}2/ -type f -name "hosts.list.part*" -exec sh -c "dos2unix  -q -n {} {}.unix" \;
+
+myFilename7=(${myTmpstages}4/hosts.list.part*)
+
+for ((i=0; i<${#myFilename7[@]}; i++)); do
+
+        #do something to each element of array
+
+        /usr/bin/dos2unix  -q -n ${myFilename7[$i]} ${myFilename7[$i]}.unix
+
+done
+
+
+#scrub comments from grouped files
+
+        if [[ -s "${myTmpstages}4/hosts.list.part1.unix" ]]; then
+        /usr/bin/grep -v -i -f ${myLists}/unmatch.list ${myTmpstages}4/hosts.list.part1.unix >>${myTmpstages}7/hosts.list.part1
+    fi
+
+
+        if [[ -s "${myTmpstages}4/hosts.list.part2.unix" ]]; then
+        /usr/bin/grep -v -i -f ${myLists}/unmatch.list ${myTmpstages}4/hosts.list.part2.unix >>${myTmpstages}5/hosts.list.part2
+
+            /usr/bin/grep -i -f ${myLists}/match.list ${myTmpstages}5/hosts.list.part2 >>${myTmpstages}6/hosts.list.part2
+
+        #strip lists to bare hostlists - classic hosts first
+            /usr/bin/awk '{print ($2)}' ${myTmpstages}6/hosts.list.part2 >>${myTmpstages}7/hosts.list.part2
+    fi
+
+
+        if [[ -s "${myTmpstages}4/hosts.list.part3.unix" ]]; then
+        /usr/bin/grep -v -i -f ${myLists}/unmatch.list ${myTmpstages}4/hosts.list.part3.unix >>${myTmpstages}6/hosts.list.part3
+
+        #strip lists to bare hostlists - complex hosts after
+            /usr/bin/awk '{print ($1)}' ${myTmpstages}6/hosts.list.part3 >>${myTmpstages}7/hosts.list.part3
+    fi
+
+
+#group all hostnames to one file - unify case
+
+        /usr/bin/awk '{gsub(/\.$/,"",($1)); print (tolower($1))}' ${myTmpstages}7/hosts.list.part{1..3} >>${myTmpstages}8/hostslist.full
+
+
+#insert user blacklist
+
+        /usr/bin/awk '{gsub(/\.$/,"",($1)); print (tolower($1))}' ${myLists}/black.list >>${myTmpstages}8/hostslist.full
+
+
+#sort axfr list - can sort -f -u here as its using encoded idn chars, not full idn chars
+
+        /usr/bin/sort -f -u ${myTmpstages}8/hostslist.full >>${myTmpstages}9/hostslist.uniqsort
+
+
+#remove our sources as we need to make sure they aren't accidentally trapped, and remove any whitelist entries, use unmatch list once more here as a final stopcheck
+
+        /usr/bin/grep -v -i -f ${myLists}/unmatch.list -f ${myLists}/white.list -f ${myLists}/sourcedomains.list ${myTmpstages}9/hostslist.uniqsort >>${myTmpstages}10/hostslist.scrubbed
+
+
+# filter axfr zonefile to make list of currently filtered domains.
+
+        /usr/bin/awk '(($4)=="CNAME") {gsub(/\.f\.$/,"",$1); print $1}' ${myTmpstages}25/hostslist.axfr >>${myTmpstages}24/hostslist.trimmed
+
+#do linecount check before heavy processing to see if a lot of source lines have gone missing relative to sync from dns, or many new lines to add
+
+myCurrlines=$(/usr/bin/wc -l <${myTmpstages}24/hostslist.trimmed)
+myNewlines=$(/usr/bin/wc -l <${myTmpstages}10/hostslist.scrubbed)
+
+
+if [[ "${myOptcase}" != "3" && "(( ${myNewlines}-${myCurrlines} ))" -lt "-1000" ]]; then
+        echo "Many less new lines than old, has a source been removed/bad download? stopping."
+        echo "new = ${myNewlines}, old = ${myCurrlines} "
+        exit 0
+elif [[ "(( ${myNewlines}-${myCurrlines} ))" -gt "50000" ]]; then
+        /usr/bin/echo "Fast initialise selected"
+        initialise
+else
+        /usr/bin/echo "Detailed synch selected"
+        synch
+fi
+
+}
+
+
+function init
+{
+
+        /usr/bin/echo "starting..."
+
+#clear working spaces but leave sources and terminal output
+
+        /usr/bin/rm -r -f ${myTmpstages}{1..25}
+
+#make working tmp space
+
+        /usr/bin/mkdir -p ${myTmpstages}{1..25}
+
+
+#get axfr from server
+
+        /usr/bin/dig @${myDNSHost} IN AXFR ${myDNSZone} >>${myTmpstages}25/hostslist.axfr
+
+#check to see if the axfr worked cleanly
+
+        myAxfrchk=$(/usr/bin/tail -n 1 ${myTmpstages}25/hostslist.axfr|/usr/bin/grep -o failed)
+        if [[ ${myAxfrchk} == "failed" ]]; then
+                /usr/bin/echo "DNS axfr failed, possible server fault. stopping"
+                exit 0
+        fi
+
+}
+
+function clearcache
+{
+
+        /usr/bin/rm -r -f ${myInclusions}/sources/*
+        /usr/bin/echo "done"
+exit 0
+
+}
+
+
+
+#start calls to functions as needed
+
+if [[ "${myOptcase}" == "1" ]]; then
+
+        init
+        scrub
+fi
+
+if [[ "${myOptcase}" == "2" ]]; then
+
+        clearcache
+
+fi
+
+if [[ "${myOptcase}" == "3" || "${myOptcase}" == "6" ]]; then
+
+        init
+        srcprep
+fi
